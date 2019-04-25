@@ -1,4 +1,5 @@
 require "help_scout/version"
+require "oauth2"
 require "httparty"
 
 class HelpScout
@@ -9,6 +10,7 @@ class HelpScout
   class InternalServerError < StandardError; end
   class ForbiddenError < StandardError; end
   class ServiceUnavailable < StandardError; end
+  class UnauthorizedError < StandardError; end
 
   # Status codes used by Help Scout, not all are implemented in this gem yet.
   # http://developer.helpscout.net/help-desk-api/status-codes/
@@ -16,6 +18,7 @@ class HelpScout
   HTTP_CREATED = 201
   HTTP_NO_CONTENT = 204
   HTTP_BAD_REQUEST = 400
+  HTTP_UNAUTHORIZED = 401
   HTTP_FORBIDDEN = 403
   HTTP_NOT_FOUND = 404
   HTTP_TOO_MANY_REQUESTS = 429
@@ -24,15 +27,27 @@ class HelpScout
 
   attr_accessor :last_response
 
-  def initialize(api_key)
-    @api_key = api_key
+  def initialize(options = {})
+    @client_id = options[:client_id]
+    @client_secret = options[:client_secret]
+    get_token()
+    self
+  end
+
+  def get_token
+    client = OAuth2::Client.new(@client_id, @client_secret, :site => 'https://api.helpscout.net', token_url: '/v2/oauth2/token')
+    response = client.client_credentials.get_token
+    unless response.token.present?
+      raise UnauthorizedError
+    end
+    @token = response.token
   end
 
   # Public: Create conversation
   #
   # data - hash with data
   #
-  # More info: http://developer.helpscout.net/help-desk-api/conversations/create/
+  # More info: https://developer.helpscout.com/mailbox-api/endpoints/conversations/create/
   #
   # Returns conversation ID
   def create_conversation(data)
@@ -40,7 +55,7 @@ class HelpScout
 
     # Extract ID of created conversation from the Location header
     conversation_uri = last_response.headers["location"]
-    conversation_uri.match(/(\d+)\.json$/)[1]
+    conversation_uri.match(/(\d+)$/)[1]
   end
 
   # Public: Get conversation
@@ -64,15 +79,12 @@ class HelpScout
   # More info: http://developer.helpscout.net/help-desk-api/conversations/list/
   #
   # Returns hash from HS with conversation data
-  def get_conversations(mailbox_id, page = 1, modified_since = nil)
+  def get_conversations(id, query = {})
     options = {
-      query: {
-        page: page,
-        modifiedSince: modified_since,
-      }
+      query: query.merge(mailbox: id)
     }
 
-    get("mailboxes/#{mailbox_id}/conversations", options)
+    get("conversations", options)
   end
 
   # Public: Update conversation
@@ -134,28 +146,24 @@ class HelpScout
   # Public: Creates conversation thread
   #
   # conversion_id - conversation id
-  # thread - thread content to be created
-  # imported - When set to true no outgoing emails or notifications will be
-  #            generated
-  # reload - Set to true to get the entire conversation in the result
+  # body - thread content to be created
   #
-  # More info: http://developer.helpscout.net/help-desk-api/conversations/create-thread/
+  # More info: https://developer.helpscout.com/mailbox-api/endpoints/conversations/threads/chat/
   #
-  # Returns true if created, false otherwise. When used with reload: true it
-  # will return the entire conversation
-  def create_thread(conversation_id:, thread:, imported: nil, reload: nil)
-    query = {}
-    { reload: reload, imported: imported }.each do |key, value|
-      query[key] = value unless value.nil?
-    end
+  # Returns true if created, false otherwise.
+  def create_chat_thread(conversation_id, body)
+    post("conversations/#{conversation_id}/chats", body: body)
+    last_response.code == HTTP_CREATED
+  end
 
-    post("conversations/#{conversation_id}", body: thread, query: query)
+  def create_reply_thread(conversation_id, body)
+    post("conversations/#{conversation_id}/reply", body: body)
+    last_response.code == HTTP_CREATED
+  end
 
-    if reload
-      last_response.parsed_response
-    else
-      last_response.code == HTTP_CREATED
-    end
+  def create_notes_thread(conversation_id, body)
+    post("conversations/#{conversation_id}/notes", body: body)
+    last_response.code == HTTP_CREATED
   end
 
   # Public: Updates conversation thread
@@ -230,15 +238,12 @@ class HelpScout
   end
 
   def request(method, path, options)
-    uri = URI("https://api.helpscout.net/v1/#{path}.json")
+    uri = URI("https://api.helpscout.net/v2/#{path}")
 
-    # The password can be anything, it's not used, see:
-    # http://developer.helpscout.net/help-desk-api/
     options = {
-      basic_auth: {
-        username: @api_key, password: 'X'
-      },
-      headers: {}
+      headers: {
+        "Authorization" => "Bearer #{@token}"
+      }
     }.merge(options)
 
     if options.key?(:body)
@@ -247,6 +252,9 @@ class HelpScout
 
     @last_response = HTTParty.send(method, uri, options)
     case last_response.code
+    when HTTP_UNAUTHORIZED
+      get_token()
+      request(method, path, options)
     when HTTP_OK, HTTP_CREATED, HTTP_NO_CONTENT
       last_response.parsed_response
     when HTTP_BAD_REQUEST
@@ -262,8 +270,8 @@ class HelpScout
       raise ServiceUnavailable
     when HTTP_TOO_MANY_REQUESTS
       retry_after = last_response.headers["Retry-After"]
-      message = "Rate limit of 200 RPM or 12 POST/PUT/DELETE requests per 5 " +
-        "seconds reached. Next request possible in #{retry_after} seconds."
+      message = "Rate limit of 400 RPM or 12 POST/PUT/DELETE  will count as 2 requests." +
+        "Next request possible in #{retry_after} seconds."
       raise TooManyRequestsError, message
     else
       raise NotImplementedError, "Help Scout returned something that is not implemented by the help_scout gem yet: #{last_response.code}: #{last_response.parsed_response["message"] if last_response.parsed_response}"
