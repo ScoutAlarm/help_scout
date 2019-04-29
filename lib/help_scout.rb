@@ -253,8 +253,8 @@ class HelpScout
     @last_response = HTTParty.send(method, uri, options)
     case last_response.code
     when HTTP_UNAUTHORIZED
-      get_token()
-      request(method, path, options)
+      error_message = JSON.parse(last_response.body)
+      raise UnauthorizedError, error_message
     when HTTP_OK, HTTP_CREATED, HTTP_NO_CONTENT
       last_response.parsed_response
     when HTTP_BAD_REQUEST
