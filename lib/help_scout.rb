@@ -176,18 +176,24 @@ class HelpScout
   #
   # Returns true if updated, false otherwise. When used with reload: true it
   # will return the entire conversation
-  def update_thread(conversation_id:, thread:, reload: nil)
-    query = {}
-    query[:reload] = reload if reload
-    body = { body: thread[:body] }
+  def update_thread(conversation_id:, thread_id:, op:, path:, value:)
+    body = {}
+    body[:op] = op
+    body[:path] = path
+    body[:value] = value
 
-    put("conversations/#{conversation_id}/threads/#{thread[:id]}", body: body, query: query)
+    patch("conversations/#{conversation_id}/threads/#{thread_id}", body: body.to_json)
 
-    if reload
-      last_response.parsed_response
-    else
-      last_response.code == HTTP_OK
-    end
+    last_response.code == HTTP_NO_CONTENT
+  end
+
+
+  def get_threads(conversion_id:)
+    get("conversations/#{conversion_id}/threads")
+  end
+
+  def search_threads(conversion_id:)
+    search("conversations/#{conversion_id}/threads")
   end
 
   # Public: Update Customer
@@ -199,8 +205,6 @@ class HelpScout
   def update_customer(id, data)
     put("customers/#{id}", { body: data })
   end
-
-  protected
 
   def post(path, options = {})
     options[:body] = options[:body].to_json if options[:body]
@@ -222,20 +226,27 @@ class HelpScout
     request(:delete, path, options)
   end
 
-  def search(path, query, page_id = 1, items = [])
-    options = { query: { page: page_id, query: "(#{query})" } }
+  def patch(path, options = {})
+    request(:patch, path, options)
+  end
+
+  def search(path, query = {}, page_id = 1, items = [])
+    options = { query: query.merge(page: page_id) }
 
     result = get(path, options)
     if !result.empty?
       next_page_id = page_id + 1
-      result["items"] += items
-      if next_page_id > result["pages"]
-        return result["items"]
+      _items = result["_embedded"].first.second
+      _items += items
+      if next_page_id > result["page"]["totalPages"]
+        return _items
       else
-        search(path, query, next_page_id, result["items"])
+        search(path, query, next_page_id, _items)
       end
     end
   end
+
+  protected
 
   def request(method, path, options)
     uri = URI("https://api.helpscout.net/v2/#{path}")
@@ -247,9 +258,8 @@ class HelpScout
     }.merge(options)
 
     if options.key?(:body)
-      options[:headers]['Content-Type'] ||= 'application/json'
+      options[:headers]['Content-Type'] ||= 'application/json; charset=UTF-8'
     end
-
     @last_response = HTTParty.send(method, uri, options)
     case last_response.code
     when HTTP_UNAUTHORIZED
